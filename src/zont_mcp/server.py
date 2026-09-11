@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -294,9 +295,16 @@ async def zont_set_heating_target_temp(device_id: int, circuit: str, value: floa
         firmware_version=firmware_version,
     )
 
-    after = await _call("devices", {"load_io": True})
-    device_after = next((d for d in after.get("devices", []) if d.get("id") == device_id), {})
-    z3k_state_after = device_after.get("io", {}).get("z3k-state", {}).get(str(circuit_id), {})
+    # Устройство подтверждает новое значение не мгновенно — опрашиваем несколько раз,
+    # пока target_temp не сойдётся с запрошенным (или не кончится число попыток).
+    z3k_state_after: dict[str, Any] = {}
+    for attempt in range(5):
+        await asyncio.sleep(0 if attempt == 0 else 1)
+        after = await _call("devices", {"load_io": True})
+        device_after = next((d for d in after.get("devices", []) if d.get("id") == device_id), {})
+        z3k_state_after = device_after.get("io", {}).get("z3k-state", {}).get(str(circuit_id), {})
+        if z3k_state_after.get("target_temp") == value:
+            break
 
     return {
         "ok": True,
@@ -304,6 +312,7 @@ async def zont_set_heating_target_temp(device_id: int, circuit: str, value: floa
         "circuit_name": circuit_name,
         "previous_target_temp": previous_target_temp,
         "new_target_temp": z3k_state_after.get("target_temp"),
+        "confirmed": z3k_state_after.get("target_temp") == value,
     }
 
 
