@@ -26,7 +26,11 @@ _SENSITIVE_KEYS = {
 
 # Ключи, чей объект целиком (со всеми вложенными полями) заменяется на REDACTED —
 # для них незачем сохранять частичную структуру (например ICCID вместе с датой).
-_SENSITIVE_OBJECT_KEYS = {"iccid"}
+_SENSITIVE_OBJECT_KEYS = {
+    "iccid",
+    "stationary_location",  # {"loc": [lon, lat]} — координаты объекта
+    "location",  # z3k_config.location: {"x": ..., "y": ...} — координаты объекта
+}
 
 
 def redact_sensitive(value: Any) -> Any:
