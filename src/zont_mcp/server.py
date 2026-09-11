@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -177,6 +178,46 @@ async def zont_send_custom_command(device_id: int, command_id: int) -> dict[str,
     command_id: ID команды.
     """
     return await _call("send_custom_command", {"device_id": device_id, "command_id": command_id})
+
+
+@mcp.tool()
+async def zont_send_z3k_command(
+    device_id: int,
+    object_id: int,
+    command_name: str,
+    command_args: dict[str, Any],
+    firmware_version: Optional[int] = None,
+    is_guaranteed: Optional[bool] = True,
+) -> dict[str, Any]:
+    """Отправить недокументированную z3k-команду устройству (H-2000+/H1V/Climatic и т.п.).
+
+    ВНИМАНИЕ: метод send_z3k_command отсутствует в официальной документации ZONT API.
+    Формат восстановлен вручную перехватом сетевых запросов веб-интерфейса ZONT
+    (my.zont.online) — используй осторожно и проверяй результат через zont_list_devices.
+
+    Известный пример: изменение целевой температуры контура отопления —
+    command_name="TargetTemperature", object_id=<id контура из z3k_config.heating_circuits
+    или z3k_config.boiler_adapters>, command_args={"value": <новая температура>}.
+
+    device_id: ID устройства.
+    object_id: ID объекта z3k (например, id отопительного контура).
+    command_name: имя команды (например "TargetTemperature").
+    command_args: аргументы команды, например {"value": 19}.
+    firmware_version: версия прошивки устройства (из devices[].firmware_version[0]);
+        если не передать, будет опущена в запросе.
+    is_guaranteed: требовать ли гарантированную доставку команды (по умолчанию true).
+    """
+    body: dict[str, Any] = {
+        "device_id": device_id,
+        "object_id": object_id,
+        "command_name": command_name,
+        "command_args": command_args,
+        "request_time": int(time.time() * 1000),
+        "is_guaranteed": is_guaranteed,
+    }
+    if firmware_version is not None:
+        body["firmware_version"] = firmware_version
+    return await _call("send_z3k_command", body)
 
 
 # --- Данные и события -----------------------------------------------------
