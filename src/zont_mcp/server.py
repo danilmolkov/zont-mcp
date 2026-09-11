@@ -10,6 +10,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .client import ZontApiError, client_from_env
+from .redact import redact_sensitive
 
 mcp = MCPServer("zont-mcp")
 _client = None
@@ -50,12 +51,22 @@ async def zont_get_authtoken(client_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def zont_list_devices(load_io: Optional[bool] = None) -> dict[str, Any]:
+async def zont_list_devices(
+    load_io: Optional[bool] = None, reveal_sensitive: Optional[bool] = False
+) -> dict[str, Any]:
     """Получить список всех устройств пользователя ZONT и их настроек.
 
+    По умолчанию чувствительные поля (пароль устройства для подключения к серверу
+    ZONT, пароль домашнего Wi-Fi, IMEI, ICCID SIM-карты, номер телефона владельца)
+    маскируются значением "***REDACTED***", так как метод devices отдаёт их в
+    открытом виде. Запрашивай reveal_sensitive=true только когда эти данные
+    действительно нужны (например, перед переносом Wi-Fi-сети на новый роутер).
+
     load_io: возвращать ли в поле io текущие состояния каждого устройства.
+    reveal_sensitive: вернуть чувствительные поля без маскирования.
     """
-    return await _call("devices", {"load_io": load_io})
+    data = await _call("devices", {"load_io": load_io})
+    return data if reveal_sensitive else redact_sensitive(data)
 
 
 @mcp.tool()
