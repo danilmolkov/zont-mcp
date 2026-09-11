@@ -6,4 +6,4 @@ dist/
 *.egg-info/
 .env
 .mcp.json
-example-zont-mcp/
+examples/
