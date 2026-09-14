@@ -52,6 +52,7 @@ MCP-сервер для [API ZONT](https://zont-online.ru/api/docs/) — поз�
 | `zont_update_device` | `update_device` | Изменить настройки устройства |
 | `zont_set_io_port` | `set_io_port` | Управление охраной/сиреной/блокировкой/автозапуском |
 | `zont_send_custom_command` | `send_custom_command` | Отправить пользовательскую команду |
+| `zont_send_z3k_command` | `send_z3k_command` (недокументирован) | Команды для z3k-устройств (например, целевая температура контура отопления) — см. [docs/z3k-api.md](docs/z3k-api.md) |
 | `zont_load_data` | `load_data` | История датчиков, термостата, GPS, событий и т.д. |
 | `zont_raw_events` | `raw_events` | История событий устройства |
 | `zont_generate_archive` | `generate_archive` | Запросить создание архива данных |

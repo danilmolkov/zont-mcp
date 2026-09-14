@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -10,6 +11,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .client import ZontApiError, client_from_env
+from .redact import redact_sensitive
+from .timeseries import decode_timeseries
 
 mcp = MCPServer("zont-mcp")
 _client = None
@@ -50,12 +53,22 @@ async def zont_get_authtoken(client_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def zont_list_devices(load_io: Optional[bool] = None) -> dict[str, Any]:
+async def zont_list_devices(
+    load_io: Optional[bool] = None, reveal_sensitive: Optional[bool] = False
+) -> dict[str, Any]:
     """Получить список всех устройств пользователя ZONT и их настроек.
 
+    По умолчанию чувствительные поля (пароль устройства для подключения к серверу
+    ZONT, пароль домашнего Wi-Fi, IMEI, ICCID SIM-карты, номер телефона владельца)
+    маскируются значением "***REDACTED***", так как метод devices отдаёт их в
+    открытом виде. Запрашивай reveal_sensitive=true только когда эти данные
+    действительно нужны (например, перед переносом Wi-Fi-сети на новый роутер).
+
     load_io: возвращать ли в поле io текущие состояния каждого устройства.
+    reveal_sensitive: вернуть чувствительные поля без маскирования.
     """
-    return await _call("devices", {"load_io": load_io})
+    data = await _call("devices", {"load_io": load_io})
+    return data if reveal_sensitive else redact_sensitive(data)
 
 
 @mcp.tool()
@@ -220,23 +233,116 @@ async def zont_send_z3k_command(
     return await _call("send_z3k_command", body)
 
 
+@mcp.tool()
+async def zont_set_heating_target_temp(device_id: int, circuit: str, value: float) -> dict[str, Any]:
+    """Изменить целевую температуру отопительного контура (z3k-устройства: H1V, H-2000+ и т.п.).
+
+    Это высокоуровневая обёртка над недокументированным send_z3k_command — сама находит
+    нужный контур по названию, поэтому не требует заранее знать его внутренний object_id.
+    Предпочитай этот инструмент вместо zont_send_z3k_command, если просто нужно поднять
+    или опустить температуру отопления/ГВС/бойлера.
+
+    device_id: ID устройства (из zont_list_devices).
+    circuit: название контура или его подстрока, без учёта регистра — например "отопление",
+        "вода"/"гвс", "котел". Также можно передать числовой ID контура
+        (z3k_config.heating_circuits[].id) как строку.
+    value: новая целевая температура, °C.
+
+    Возвращает объект с полями circuit_id, circuit_name, previous_target_temp,
+    new_target_temp — свежепрочитанными после отправки команды, чтобы сразу видеть
+    результат без отдельного вызова zont_list_devices.
+    """
+    before = await _call("devices", {"load_io": True})
+    device = next((d for d in before.get("devices", []) if d.get("id") == device_id), None)
+    if device is None:
+        raise ToolError(f"Устройство {device_id} не найдено")
+
+    circuits = device.get("z3k_config", {}).get("heating_circuits", [])
+    if not circuits:
+        raise ToolError(
+            f"У устройства {device_id} нет z3k_config.heating_circuits — это не z3k-устройство "
+            "с отопительными контурами, используй zont_update_device вместо этого инструмента."
+        )
+
+    match = None
+    if circuit.strip().isdigit():
+        wanted_id = int(circuit.strip())
+        match = next((c for c in circuits if c.get("id") == wanted_id), None)
+    if match is None:
+        needle = circuit.strip().lower()
+        candidates = [c for c in circuits if needle in (c.get("name") or "").lower()]
+        if len(candidates) == 1:
+            match = candidates[0]
+        elif len(candidates) > 1:
+            names = ", ".join(f'"{c.get("name")}" (id={c.get("id")})' for c in candidates)
+            raise ToolError(f'Неоднозначное название контура "{circuit}", подходят: {names}')
+
+    if match is None:
+        available = ", ".join(f'"{c.get("name")}" (id={c.get("id")})' for c in circuits)
+        raise ToolError(f'Контур "{circuit}" не найден. Доступные контуры: {available}')
+
+    circuit_id = match["id"]
+    circuit_name = match.get("name")
+    z3k_state_before = device.get("io", {}).get("z3k-state", {}).get(str(circuit_id), {})
+    previous_target_temp = z3k_state_before.get("target_temp")
+    firmware_version = (device.get("firmware_version") or [None])[0]
+
+    await zont_send_z3k_command(
+        device_id=device_id,
+        object_id=circuit_id,
+        command_name="TargetTemperature",
+        command_args={"value": value},
+        firmware_version=firmware_version,
+    )
+
+    # Устройство подтверждает новое значение не мгновенно — опрашиваем несколько раз,
+    # пока target_temp не сойдётся с запрошенным (или не кончится число попыток).
+    z3k_state_after: dict[str, Any] = {}
+    for attempt in range(5):
+        await asyncio.sleep(0 if attempt == 0 else 1)
+        after = await _call("devices", {"load_io": True})
+        device_after = next((d for d in after.get("devices", []) if d.get("id") == device_id), {})
+        z3k_state_after = device_after.get("io", {}).get("z3k-state", {}).get(str(circuit_id), {})
+        if z3k_state_after.get("target_temp") == value:
+            break
+
+    return {
+        "ok": True,
+        "circuit_id": circuit_id,
+        "circuit_name": circuit_name,
+        "previous_target_temp": previous_target_temp,
+        "new_target_temp": z3k_state_after.get("target_temp"),
+        "confirmed": z3k_state_after.get("target_temp") == value,
+    }
+
+
 # --- Данные и события -----------------------------------------------------
 
 
 @mcp.tool()
-async def zont_load_data(requests: list[dict[str, Any]]) -> dict[str, Any]:
+async def zont_load_data(
+    requests: list[dict[str, Any]], decode: Optional[bool] = True
+) -> dict[str, Any]:
     """Загрузить историю данных устройств.
 
     Показания температурных датчиков, работа термостата, GPS-треки, события,
     состояние контроллера и т.д. Можно запросить несколько устройств и типов
     данных за один вызов. Временные метки — unix time (секунды с 1970-01-01 UTC).
 
+    ZONT кодирует исторические ряды в формате Delta-time Array — каждая метка
+    времени, кроме первой, хранится как разница в секундах от предыдущей, что
+    неудобно читать напрямую. По умолчанию (decode=true) такие ряды
+    раскодируются в список {"time": <unix>, "value": ...} с абсолютными
+    метками времени. Передай decode=false, чтобы получить сырой формат ZONT.
+
     requests: список запросов вида {"device_id": int, "data_types": [str, ...],
         "mintime"?: int, "maxtime"?: int}. data_types, например: temperature,
         thermostat_work, gps, events, custom_controls, z3k_temperature,
         z3k_boiler_adapter, ztc_state.
+    decode: раскодировать Delta-time Array в абсолютные метки времени (по умолчанию true).
     """
-    return await _call("load_data", {"requests": requests})
+    data = await _call("load_data", {"requests": requests})
+    return decode_timeseries(data) if decode else data
 
 
 @mcp.tool()
